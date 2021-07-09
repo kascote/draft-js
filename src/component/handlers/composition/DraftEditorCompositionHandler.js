@@ -17,6 +17,7 @@ const DOMObserver = require('DOMObserver');
 const DraftModifier = require('DraftModifier');
 const DraftOffsetKey = require('DraftOffsetKey');
 const EditorState = require('EditorState');
+const SelectionState = require('SelectionState');
 const Keys = require('Keys');
 
 const editOnSelect = require('editOnSelect');
@@ -184,29 +185,47 @@ const DraftEditorCompositionHandler = {
         .getBlockTree(blockKey)
         .getIn([decoratorKey, 'leaves', leafKey]);
 
-      const replacementRange = editorState.getSelection().merge({
-        anchorKey: blockKey,
-        focusKey: blockKey,
-        anchorOffset: start,
-        focusOffset: end,
-        isBackward: false,
-      });
+      if (composedChars === '__remove_key__') {
+        const prev = contentState.getBlockBefore(blockKey);
+        if (prev) {
+          const removeRange = new SelectionState({
+            anchorKey: prev.key,
+            anchorOffset: prev.getText().length,
+            focusKey: blockKey,
+            focusOffset: end,
+          });
+          contentState = DraftModifier.removeRange(
+            contentState,
+            removeRange,
+            'forward',
+          );
+        }
+      } else {
+        const replacementRange = editorState.getSelection().merge({
+          anchorKey: blockKey,
+          focusKey: blockKey,
+          anchorOffset: start,
+          focusOffset: end,
+          isBackward: false,
+        });
 
-      const entityKey = getEntityKeyForSelection(
-        contentState,
-        replacementRange,
-      );
-      const currentStyle = contentState
-        .getBlockForKey(blockKey)
-        .getInlineStyleAt(start);
+        const entityKey = getEntityKeyForSelection(
+          contentState,
+          replacementRange,
+        );
+        const currentStyle = contentState
+          .getBlockForKey(blockKey)
+          .getInlineStyleAt(start);
 
-      contentState = DraftModifier.replaceText(
-        contentState,
-        replacementRange,
-        composedChars,
-        currentStyle,
-        entityKey,
-      );
+        contentState = DraftModifier.replaceText(
+          contentState,
+          replacementRange,
+          composedChars,
+          currentStyle,
+          entityKey,
+        );
+      }
+
       // We need to update the editorState so the leaf node ranges are properly
       // updated and multiple mutations are correctly applied.
       editorState = EditorState.set(editorState, {

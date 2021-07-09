@@ -13,10 +13,8 @@
 
 const UserAgent = require('UserAgent');
 
-const findAncestorOffsetKey = require('findAncestorOffsetKey');
 const Immutable = require('immutable');
 const invariant = require('invariant');
-const nullthrows = require('nullthrows');
 
 const {Map} = Immutable;
 
@@ -45,8 +43,9 @@ class DOMObserver {
   constructor(container: HTMLElement) {
     this.container = container;
     this.mutations = Map();
-    if (window.MutationObserver && !USE_CHAR_DATA) {
-      this.observer = new window.MutationObserver(mutations =>
+    const containerWindow = getWindowForNode(container);
+    if (containerWindow.MutationObserver && !USE_CHAR_DATA) {
+      this.observer = new containerWindow.MutationObserver(mutations =>
         this.registerMutations(mutations),
       );
     } else {
@@ -100,37 +99,83 @@ class DOMObserver {
     }
   }
 
-  getMutationTextContent(mutation: MutationRecordT): ?string {
+  registerMutation(mutation: MutationRecordT): void {
     const {type, target, removedNodes} = mutation;
+
     if (type === 'characterData') {
+      const targetOffsetKey = findRealAncestorOffsetKey(target);
+
       // When `textContent` is '', there is a race condition that makes
       // getting the offsetKey from the target not possible.
       // These events are also followed by a `childList`, which is the one
       // we are able to retrieve the offsetKey and apply the '' text.
-      if (target.textContent !== '') {
-        return target.textContent;
-      }
-    } else if (type === 'childList') {
-      // `characterData` events won't happen or are ignored when
-      // removing the last character of a leaf node, what happens
-      // instead is a `childList` event with a `removedNodes` array.
-      // For this case the textContent should be '' and
-      // `DraftModifier.replaceText` will make sure the content is
-      // updated properly.
-      if (removedNodes && removedNodes.length) {
-        return '';
-      }
-    }
-    return null;
-  }
+      if (target.textContent !== '' && targetOffsetKey) {
+        let txt = target.textContent;
+        // IE 11 considers the enter keypress that concludes the composition
+        // as an input char. This strips that newline character so the draft
+        // state does not receive spurious newlines.
+        if (USE_CHAR_DATA) {
+          txt = target.textContent.replace('\n', '');
+        }
 
-  registerMutation(mutation: MutationRecordT): void {
-    const textContent = this.getMutationTextContent(mutation);
-    if (textContent != null) {
-      const offsetKey = nullthrows(findAncestorOffsetKey(mutation.target));
-      this.mutations = this.mutations.set(offsetKey, textContent);
+        this.mutations = this.mutations.set(targetOffsetKey, txt);
+      }
+    } else if (type === 'childList' && removedNodes && removedNodes.length) {
+      const rmNode = removedNodes[0];
+      const rmNodeOffsetKey = getOffsetKey(rmNode);
+      // that means a leaf in treeMap will be empty
+      if (rmNodeOffsetKey) {
+        this.mutations = this.mutations.set(rmNodeOffsetKey, '__remove_key__');
+      }
+    } else if (type === 'childList' && target.textContent !== '') {
+      const targetOffsetKey = findRealAncestorOffsetKey(target);
+      // Typing Chinese in an empty block in MS Edge results in a
+      // `childList` event with non-empty textContent.
+      // See https://github.com/facebook/draft-js/issues/2082
+      if (targetOffsetKey) {
+        this.mutations = this.mutations.set(
+          targetOffsetKey,
+          target.textContent,
+        );
+      }
     }
   }
+}
+
+// See https://github.com/facebook/draft-js/issues/2466
+function findRealAncestorOffsetKey(node: Node): ?string {
+  let searchNode = node;
+  while (
+    searchNode &&
+    searchNode !== getCorrectDocumentFromNode(node).documentElement
+  ) {
+    const key = getOffsetKey(searchNode);
+
+    if (key) {
+      return key;
+    }
+    searchNode = searchNode.parentNode;
+  }
+  return null;
+}
+
+function getOffsetKey(node: Node): ?string {
+  const key = node.getAttribute && node.getAttribute('data-offset-key');
+  return key || null;
+}
+
+function getCorrectDocumentFromNode(node: ?Node): Document {
+  if (!node || !node.ownerDocument) {
+    return document;
+  }
+  return node.ownerDocument;
+}
+
+function getWindowForNode(node: ?Node): Window {
+  if (!node || !node.ownerDocument || !node.ownerDocument.defaultView) {
+    return window;
+  }
+  return node.ownerDocument.defaultView;
 }
 
 module.exports = DOMObserver;
