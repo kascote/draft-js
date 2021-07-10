@@ -47,6 +47,8 @@ const RESOLVE_DELAY = 20;
 let resolved = false;
 let stillComposing = false;
 let domObserver = null;
+let isCollapsedAtBeginning = true;
+let startEditorState = null;
 
 function startDOMObserver(editor: DraftEditor) {
   if (!domObserver) {
@@ -61,6 +63,40 @@ const DraftEditorCompositionHandler = {
    * mode. Continue the current composition session to prevent a re-render.
    */
   onCompositionStart: function(editor: DraftEditor): void {
+    startEditorState = editor._latestEditorState;
+
+    const startSelection = startEditorState.getSelection();
+    // if the selection is not collapsed when start composition
+    // update the undo stack
+    if (!startSelection.isCollapsed()) {
+      const currentContent = startEditorState.getCurrentContent();
+
+      const rmContentState = DraftModifier.removeRange(
+        currentContent,
+        startSelection,
+        'backward',
+      );
+
+      // if selection is not collapsed, update startEditorstate
+      startEditorState = EditorState.push(
+        startEditorState,
+        rmContentState,
+        // use 'insert-fragment' rather than 'remove-range'
+        // because later we will insert the content here
+        // more semantically consistent with the description of 'insert-fragment'
+        'insert-fragment',
+      );
+
+      editor.update(startEditorState);
+
+      isCollapsedAtBeginning = false;
+    } else {
+      isCollapsedAtBeginning = true;
+    }
+
+    // keep dom sync with state before startDOMObserver
+    // editor.restoreEditorDOM();
+
     stillComposing = true;
     startDOMObserver(editor);
   },
@@ -175,6 +211,9 @@ const DraftEditorCompositionHandler = {
     //   return;
     // }
 
+    const startContentState = startEditorState.getCurrentContent();
+    const startSelection = startEditorState.getSelection();
+
     let contentState = editorState.getCurrentContent();
     mutations.forEach((composedChars, offsetKey) => {
       const {blockKey, decoratorKey, leafKey} = DraftOffsetKey.decode(
@@ -244,18 +283,69 @@ const DraftEditorCompositionHandler = {
 
     editor.restoreEditorDOM();
 
-    const editorStateWithUpdatedSelection = EditorState.acceptSelection(
-      editorState,
-      compositionEndSelectionState,
-    );
+    let stateWillUpdate = editorState;
+    let newContentState = editorState.getCurrentContent();
 
-    editor.update(
-      EditorState.push(
+    if (isCollapsedAtBeginning) {
+      // 'insert' behaviour
+      // we'll use 'EditorState.push' to update state
+      // so it may create a new item in undo-stack(that depends on 'push' logic)
+
+      // recover currentContent(that will be updated with new contentState) with correct selection status(including selectionBefore and selectionAfter)
+      const recoverContentState = EditorState.set(editorState, {
+        currentContent: startContentState,
+      });
+      // recover selection
+      const recoverSelectionState = EditorState.acceptSelection(
+        recoverContentState,
+        startSelection,
+      );
+      // recover selectionBefore & selectionAfter
+      let withCorrectABSelectionContent = recoverSelectionState
+        .getCurrentContent()
+        .set('selectionBefore', startContentState.getSelectionBefore());
+      withCorrectABSelectionContent = withCorrectABSelectionContent.set(
+        'selectionAfter',
+        startContentState.getSelectionAfter(),
+      );
+      // apply withCorrectABSelectionContent
+      const withCorrectABSelectionState = EditorState.set(
+        recoverSelectionState,
+        {
+          currentContent: withCorrectABSelectionContent,
+        },
+      );
+
+      // construct new contentState with correct selectionBefore & selectionAfter
+      newContentState = newContentState.set(
+        'selectionBefore',
+        startContentState.getSelectionAfter(), // newContentState's selectionBefore is currentContentState's selectionAfter
+      );
+      newContentState = newContentState.set(
+        'selectionAfter',
+        compositionEndSelectionState, // ensure the latest selection correct(in 'EditorState.push' logic)
+      );
+
+      // push new state
+      stateWillUpdate = EditorState.push(
+        withCorrectABSelectionState,
+        newContentState,
+        'insert-characters',
+      );
+    } else {
+      const editorStateWithUpdatedSelection = EditorState.acceptSelection(
+        editorState,
+        compositionEndSelectionState,
+      );
+
+      stateWillUpdate = EditorState.push(
         editorStateWithUpdatedSelection,
         contentState,
         'insert-characters',
-      ),
-    );
+      );
+    }
+
+    editor.update(stateWillUpdate);
   },
 };
 
